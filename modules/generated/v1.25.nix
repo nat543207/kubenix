@@ -88,10 +88,12 @@ let
         (value // { _priority = i; }))
       values);
 
-  submoduleOf = ref: types.submodule ({ name, ... }: {
+  moduleForDefinition = ref: {
     options = definitions."${ref}".options or { };
     config = definitions."${ref}".config or { };
-  });
+  };
+
+  submoduleOf = ref: types.submodule (moduleForDefinition ref);
 
   submoduleWithMergeOf = ref: mergeKey: types.submodule ({ name, ... }:
     let
@@ -101,11 +103,12 @@ let
         else name;
     in
     {
-      options = definitions."${ref}".options // {
+      imports = [ (moduleForDefinition ref) ];
+      options = {
         # position in original array
         _priority = mkOption { type = types.nullOr types.int; default = null; };
       };
-      config = definitions."${ref}".config // {
+      config = {
         ${mergeKey} = mkOverride 1002 (
           # use name as mergeKey only if it is not coming from mergeValuesByKey
           if (!hasPrefix "__kubenix_list_merge_key_" name)
@@ -120,18 +123,15 @@ let
       apiVersion = if group == "core" then version else "${group}/${version}";
     in
     types.submodule ({ name, ... }: {
-      imports = getDefaults resource group version kind;
-      options = definitions."${ref}".options;
-      config = mkMerge [
-        definitions."${ref}".config
-        {
-          kind = mkOptionDefault kind;
-          apiVersion = mkOptionDefault apiVersion;
+      imports = [ (moduleForDefinition ref) ]
+        ++ (getDefaults resource group version kind);
+      config = {
+        kind = mkOptionDefault kind;
+        apiVersion = mkOptionDefault apiVersion;
 
-          # metdata.name cannot use option default, due deep config
-          metadata.name = mkOptionDefault name;
-        }
-      ];
+        # metdata.name cannot use option default, due deep config
+        metadata.name = mkOptionDefault name;
+      };
     });
 
   coerceAttrsOfSubmodulesToListByKey = ref: attrMergeKey: listMergeKeys: (types.coercedTo
