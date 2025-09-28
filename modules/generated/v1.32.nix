@@ -19,9 +19,10 @@ let
     else
       values;
 
-  getDefaults = resource: group: version: kind:
+  getDefaults = matchAllMissing: resource: group: version: kind:
     catAttrs "default" (filter
       (default:
+        ((all isNull [ default.resource default.group default.version default.kind ]) -> matchAllMissing) &&
         (default.resource == null || default.resource == resource) &&
         (default.group == null || default.group == group) &&
         (default.version == null || default.version == version) &&
@@ -88,12 +89,42 @@ let
         (value // { _priority = i; }))
       values);
 
-  moduleForDefinition = ref: {
-    options = definitions."${ref}".options or { };
-    config = definitions."${ref}".config or { };
-  };
+  parseTypeAttributesFromRef = ref:
+    let
+      parts = splitString "." ref;
+      kind = last parts;
+      version = last (dropEnd 1 parts);
+      resourceUriParts = dropEnd 2 parts;
+      groupParts =
+        if (lists.hasPrefix
+          [ "io" "k8s" "api" "core" ]
+          resourceUriParts)
+        then [ "core" ]
+        else if (lists.hasPrefix
+          [ "io" "k8s" "api" ]
+          resourceUriParts)
+        then [ "io" "k8s" ] ++ (drop 3 resourceUriParts)
+        else resourceUriParts;
+      group = join
+        "."
+        (lists.reverseList groupParts);
+    in
+    {
+      inherit group version kind;
+      resource = ref;
+    };
 
-  submoduleOf = ref: types.submodule (moduleForDefinition ref);
+  moduleOf = ref:
+    let
+      parsed = parseTypeAttributesFromRef ref;
+    in
+    {
+      imports = getDefaults false parsed.resource parsed.group parsed.version parsed.kind;
+      options = definitions."${ref}".options or { };
+      config = definitions."${ref}".config or { };
+    };
+
+  submoduleOf = ref: types.submodule (moduleOf ref);
 
   submoduleWithMergeOf = ref: mergeKey: types.submodule ({ name, ... }:
     let
@@ -103,7 +134,7 @@ let
         else name;
     in
     {
-      imports = [ (moduleForDefinition ref) ];
+      imports = [ (moduleOf ref) ];
       options = {
         # position in original array
         _priority = mkOption { type = types.nullOr types.int; default = null; };
@@ -123,8 +154,9 @@ let
       apiVersion = if group == "core" then version else "${group}/${version}";
     in
     types.submodule ({ name, ... }: {
-      imports = [ (moduleForDefinition ref) ]
-        ++ (getDefaults resource group version kind);
+      imports = [
+        (moduleOf ref)
+      ] ++ (getDefaults true resource group version kind);
       config = {
         kind = mkOptionDefault kind;
         apiVersion = mkOptionDefault apiVersion;
