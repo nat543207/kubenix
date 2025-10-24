@@ -30,7 +30,7 @@ with lib; let
       };
 
       defaults = mkOption {
-        description = "Kubernetes defaults to apply to resources";
+        description = "Defaults to apply to Kubernetes types.  Unless ref is specified, each default only applies to matching top-level resource types.";
         type = types.listOf (types.submodule (_: {
           options = {
             group = mkOption {
@@ -53,6 +53,12 @@ with lib; let
 
             resource = mkOption {
               description = "Resource to apply default to (all by default)";
+              type = types.nullOr types.str;
+              default = null;
+            };
+
+            ref = mkOption {
+              description = "OpenAPI type identifier to apply default to (only resource types by default)";
               type = types.nullOr types.str;
               default = null;
             };

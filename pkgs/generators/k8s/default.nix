@@ -346,8 +346,9 @@ with lib; let
         else
           values;
 
-      getDefaults = resource: group: version: kind:
+      getDefaults = matchAllMissing: resource: group: version: kind:
         catAttrs "default" (filter (default:
+          ((all isNull [ default.resource default.group default.version default.kind ]) -> matchAllMissing) &&
           (default.resource == null || default.resource == resource) &&
           (default.group == null || default.group == group) &&
           (default.version == null || default.version == version) &&
@@ -406,10 +407,37 @@ with lib; let
           ) (value // { _priority = i; }))
         values);
 
-      submoduleOf = ref: types.submodule ({name, ...}: {
+      parseTypeAttributesFromRef = ref: let
+        parts = splitString "." ref;
+        kind = last parts;
+        version = last (dropEnd 1 parts);
+        resourceUriParts = dropEnd 2 parts;
+        groupParts = if (lists.hasPrefix
+            [ "io" "k8s" "api" "core" ]
+            resourceUriParts)
+          then [ "core" ]
+          else if (lists.hasPrefix
+            [ "io" "k8s" "api" ]
+            resourceUriParts)
+          then [ "io" "k8s" ] ++ (drop 3 resourceUriParts)
+          else resourceUriParts;
+        group = join
+          "."
+          (lists.reverseList groupParts);
+      in {
+        inherit group version kind;
+        resource = ref;
+      };
+
+      moduleOf = ref: let
+        parsed = parseTypeAttributesFromRef ref;
+      in {
+        imports = getDefaults false parsed.resource parsed.group parsed.version parsed.kind;
         options = definitions."''${ref}".options or {};
         config = definitions."''${ref}".config or {};
-      });
+      };
+
+      submoduleOf = ref: types.submodule (moduleOf ref);
 
       submoduleWithMergeOf = ref: mergeKey: types.submodule ({name, ...}: let
         convertName = name:
@@ -417,11 +445,12 @@ with lib; let
           then toInt name
           else name;
       in {
-        options = definitions."''${ref}".options // {
+        imports = [ (moduleOf ref) ];
+        options = {
           # position in original array
           _priority = mkOption { type = types.nullOr types.int; default = null; };
         };
-        config = definitions."''${ref}".config // {
+        config = {
           ''${mergeKey} = mkOverride 1002 (
             # use name as mergeKey only if it is not coming from mergeValuesByKey
             if (!hasPrefix "__kubenix_list_merge_key_" name)
@@ -434,18 +463,16 @@ with lib; let
       submoduleForDefinition = ref: resource: kind: group: version: let
         apiVersion = if group == "core" then version else "''${group}/''${version}";
       in types.submodule ({name, ...}: {
-        imports = getDefaults resource group version kind;
-        options = definitions."''${ref}".options;
-        config = mkMerge [
-          definitions."''${ref}".config
-          {
-            kind = mkOptionDefault kind;
-            apiVersion = mkOptionDefault apiVersion;
+        imports = [
+          (moduleOf ref)
+        ] ++ (getDefaults true resource group version kind);
+        config = {
+          kind = mkOptionDefault kind;
+          apiVersion = mkOptionDefault apiVersion;
 
-            # metdata.name cannot use option default, due deep config
-            metadata.name = mkOptionDefault name;
-          }
-        ];
+          # metdata.name cannot use option default, due deep config
+          metadata.name = mkOptionDefault name;
+        };
       });
 
       coerceAttrsOfSubmodulesToListByKey = ref: attrMergeKey: listMergeKeys: (types.coercedTo
