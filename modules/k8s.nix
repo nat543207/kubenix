@@ -23,6 +23,25 @@ with lib; let
     then map moduleToAttrs value
     else value;
 
+  selfExtendingSubmodule = baseModule: extend: lib.mkOptionType {
+    name = "selfExtendingSubmodule";
+    merge = loc: defs: let
+      baseValue = (lib.types.submodule {
+        imports = [
+          { freeformType = lib.types.anything; }
+          baseModule
+        ];
+      }).merge loc defs;
+
+      extendedValue = (lib.types.submodule {
+        imports = [
+          baseModule
+          (extend baseValue)
+        ];
+      }).merge loc defs;
+    in extendedValue;
+  };
+
   apiOptions = { config, ... }: {
     options = {
       definitions = mkOption {
@@ -147,13 +166,13 @@ with lib; let
     in
     builtins.compareVersions v1 v2;
 
-  customResourceTypesByAttrName = zipAttrs (mapAttrsToList
+  byAttrName = customResourceTypes: zipAttrs (mapAttrsToList
     (_: resourceType: {
       ${resourceType.attrName} = resourceType;
     })
-    cfg.customTypes);
+    customResourceTypes);
 
-  customResourceTypesByAttrNameSortByVersion = mapAttrs
+  byAttrNameSortByVersion = customResourceTypes: mapAttrs
     (_: resourceTypes:
       reverseList (sort
         (
@@ -162,9 +181,9 @@ with lib; let
         )
         resourceTypes)
     )
-    customResourceTypesByAttrName;
+    (byAttrName customResourceTypes);
 
-  latestCustomResourceTypes = mapAttrsToList (_: last) customResourceTypesByAttrNameSortByVersion;
+  latest = customResourceTypes: mapAttrsToList (_: last) (byAttrNameSortByVersion customResourceTypes);
 
   customResourceModuleForType = config: ct: { name, ... }: {
     imports = getDefaults ct.name ct.group ct.version ct.kind;
@@ -198,7 +217,7 @@ with lib; let
     };
   };
 
-  customResourceOptions = (mapAttrsToList
+  customResourceOptions = customResourceTypes: (mapAttrsToList
     (_: ct: { config, ... }:
       let
         module = customResourceModuleForType config ct;
@@ -210,7 +229,7 @@ with lib; let
           default = { };
         };
       })
-    cfg.customTypes)
+    customResourceTypes)
   ++ (map
     (ct: { options, config, ... }:
       let
@@ -226,7 +245,7 @@ with lib; let
         config.resources.${ct.group}.${ct.version}.${ct.kind} =
           mkAliasDefinitions options.resources.${ct.attrName};
       })
-    latestCustomResourceTypes);
+    (latest customResourceTypes));
 
   coerceListOfSubmodulesToAttrs = submodule: keyFn:
     let
@@ -296,6 +315,33 @@ with lib; let
     if cfg.enableHashedNames && elem kind [ "ConfigMap" "Secret" ] then
       k8s.injectHashedNames object
     else object;
+
+  isCustomResourceDefinition = object: object.apiVersion == "apiextensions.k8s.io/v1" && object.kind == "CustomResourceDefinition";
+
+  typesFromCustomResourceDefinition = crd: map
+    (ver: let
+      syntheticRef = join
+        "."
+        (reverseList
+          ([ kind version ]
+            ++ (strSplit "." group)));
+      resource = syntheticRef;
+       group = crd.spec.group;
+       version = ver.name;
+       kind = crd.spec.names.kind;
+       name = toLower crd.spec.names.kind;
+    in {
+      inherit resource group version kind name;
+      attrName = name;
+      description = "Unchecked definitions of imported resource '${crd.spec.names.kind}'";
+      module = { freeformType = types.anything; };
+    })
+    crd.spec.versions;
+
+  typesFromCustomResourceDefinitionAttrs = concatMapAttrs
+    (_: crd: genAttrs'
+      (typesFromCustomResourceDefinition crd)
+      (customType: nameValuePair (gvkKeyFn customType) customType));
 in
 {
   imports = [ ./base.nix ];
@@ -338,13 +384,18 @@ in
     };
 
     api = mkOption {
-      type = types.submodule {
+      type = selfExtendingSubmodule {
         imports = [
           ./generated/v${cfg.version}.nix
           apiOptions
-        ]
-        ++ customResourceOptions;
-      };
+        ];
+      }
+      (super: {
+        imports = customResourceOptions
+          ((typesFromCustomResourceDefinitionAttrs
+            super.resources."apiextensions.k8s.io".v1.CustomResourceDefinition)
+            // cfg.customTypes);
+      });
       default = { };
     };
 
@@ -502,7 +553,9 @@ in
           (_: cr: {
             inherit (cr) name group version kind attrName;
           })
-          cfg.customTypes;
+          ((typesFromCustomResourceDefinitionAttrs
+            cfg.api.resources."apiextensions.k8s.io".v1.CustomResourceDefinition)
+            // cfg.customTypes);
 
         defaults = [{
           default = {
